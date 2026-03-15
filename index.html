@@ -1,4 +1,4 @@
-<!-- rebuild -->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -988,7 +988,7 @@ function buildEntry(prefix, type) {
     item: g('item'), type,
     category: g('category'),
     supplier: g('supplier'),
-    taxId: g('taxid'),
+    taxId: "'" + g('taxid'),
     address: g('address'),
     priceExVat: c.priceExVat,
     taxPct: vatPct>0?vatPct+'%':'0%',
