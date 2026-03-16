@@ -282,6 +282,15 @@
   .rpt-section-label { font-family:var(--condensed); font-size:10px; font-weight:700; color:var(--muted2); letter-spacing:3px; text-transform:uppercase; margin-bottom:8px; display:flex; align-items:center; gap:8px; }
   .rpt-section-label::after { content:''; flex:1; height:1px; background:var(--border2); }
   .rpt-empty { text-align:center; padding:50px 0; font-family:var(--mono); font-size:11px; color:var(--muted2); letter-spacing:1px; }
+  .btn-sync-sheet {
+    background: transparent; border: 1px solid var(--pink);
+    color: var(--pink); font-family: var(--condensed);
+    font-size: 11px; font-weight: 700; letter-spacing: 2px;
+    padding: 8px 14px; cursor: pointer; white-space: nowrap;
+    transition: background .15s; flex-shrink: 0;
+  }
+  .btn-sync-sheet:hover { background: var(--pink-dim); }
+  .btn-sync-sheet:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .bottom-nav {
     position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
@@ -657,7 +666,9 @@
 <div class="screen" id="screen-report">
   <div class="month-picker-row">
     <select id="report-month" onchange="renderReport()"></select>
+    <button class="btn-sync-sheet" id="sync-sheet-btn" onclick="syncFromSheet()">⟳ SYNC</button>
   </div>
+  <div id="rpt-sync-status" style="font-family:var(--mono);font-size:10px;color:var(--muted2);letter-spacing:1px;margin-bottom:12px;display:none;"></div>
 
   <div id="rpt-empty" class="rpt-empty" style="display:none;">NO DATA FOR THIS MONTH</div>
   <div id="rpt-content">
@@ -1371,43 +1382,76 @@ function initMonthPicker() {
   }
 }
 
+// sheetData = array of row arrays from Google Sheet
+var sheetData = load('fdp_sheet_data', []);
+var lastSynced = load('fdp_last_synced', null);
+
 function renderReport() {
   var sel = document.getElementById('report-month');
   if (!sel) return;
   var parts = sel.value.split('-');
   var year = parseInt(parts[0]); var month = parseInt(parts[1]);
 
-  var monthTx = transactions.filter(function(t) {
-    var dateStr = t._date || today();
-    var d = new Date(dateStr + 'T00:00:00');
+  // Show last synced time
+  var statusEl = document.getElementById('rpt-sync-status');
+  if (lastSynced) {
+    statusEl.style.display = 'block';
+    statusEl.textContent = '// LAST SYNCED: ' + lastSynced;
+  } else {
+    statusEl.style.display = 'block';
+    statusEl.textContent = '// NOT SYNCED YET — TAP ⟳ SYNC TO LOAD SHEET DATA';
+  }
+
+  var empty = document.getElementById('rpt-empty');
+  var rptContent = document.getElementById('rpt-content');
+
+  // Use sheetData if available, otherwise fall back to local transactions
+  var source = sheetData.length ? sheetData : transactions;
+  var useSheet = sheetData.length > 0;
+
+  var monthTx = source.filter(function(t) {
+    // sheetData rows: [date, item, type, category, supplier, taxId, address,
+    //   priceExVat, taxPct, taxAmount, whtPct, whtAmount, total,
+    //   netAmount, invoiceNo, project, account, notes, pndType]
+    var dateStr = useSheet ? String(t[0]||'') : (t._date || today());
+    // Parse Thai date format d/m/yyyy or yyyy-mm-dd
+    var d;
+    if (dateStr.indexOf('/') > -1) {
+      var dp = dateStr.split('/');
+      if (dp.length === 3) d = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
+    } else {
+      d = new Date(dateStr + 'T00:00:00');
+    }
+    if (!d || isNaN(d)) return false;
     return d.getFullYear() === year && (d.getMonth()+1) === month;
   });
 
-  var empty = document.getElementById('rpt-empty');
-  var content = document.getElementById('rpt-content');
-
   if (!monthTx.length) {
-    empty.style.display = 'block'; content.style.display = 'none'; return;
+    empty.style.display = 'block'; rptContent.style.display = 'none'; return;
   }
-  empty.style.display = 'none'; content.style.display = 'block';
+  empty.style.display = 'none'; rptContent.style.display = 'block';
 
-  var rev = monthTx.filter(function(t){ return (t._type||t.type) === 'Revenue'; });
-  var exp = monthTx.filter(function(t){ return (t._type||t.type) === 'Expense'; });
+  function getField(t, sheetIdx, localKey) {
+    return useSheet ? (parseFloat(t[sheetIdx])||0) : (parseFloat(t[localKey])||0);
+  }
+  function getType(t) {
+    return useSheet ? String(t[2]||'') : (t._type||t.type||'');
+  }
 
-  var totalRev = rev.reduce(function(s,t){ return s + (parseFloat(t.total)||0); }, 0);
-  var totalExp = exp.reduce(function(s,t){ return s + (parseFloat(t.total)||0); }, 0);
+  var rev = monthTx.filter(function(t){ return getType(t) === 'Revenue'; });
+  var exp = monthTx.filter(function(t){ return getType(t) === 'Expense'; });
+
+  // col indices: total=12, taxAmount=9, whtAmount=11, netAmount=13
+  var totalRev = rev.reduce(function(s,t){ return s + getField(t,12,'total'); }, 0);
+  var totalExp = exp.reduce(function(s,t){ return s + getField(t,12,'total'); }, 0);
   var netPL = totalRev - totalExp;
 
-  // VAT collected = sum of taxAmount on Revenue entries
-  var vatCollected = rev.reduce(function(s,t){ return s + (parseFloat(t.taxAmount)||0); }, 0);
-  // VAT paid = sum of taxAmount on Expense entries
-  var vatPaid = exp.reduce(function(s,t){ return s + (parseFloat(t.taxAmount)||0); }, 0);
+  var vatCollected = rev.reduce(function(s,t){ return s + getField(t,9,'taxAmount'); }, 0);
+  var vatPaid = exp.reduce(function(s,t){ return s + getField(t,9,'taxAmount'); }, 0);
   var vatPayable = vatCollected - vatPaid;
 
-  // WHT deducted = whtAmount on Revenue (we were the ones being deducted)
-  var whtDeducted = rev.reduce(function(s,t){ return s + (parseFloat(t.whtAmount)||0); }, 0);
-  // WHT paid = whtAmount on Expense (we deducted from suppliers)
-  var whtPaid = exp.reduce(function(s,t){ return s + (parseFloat(t.whtAmount)||0); }, 0);
+  var whtDeducted = rev.reduce(function(s,t){ return s + getField(t,11,'whtAmount'); }, 0);
+  var whtPaid = exp.reduce(function(s,t){ return s + getField(t,11,'whtAmount'); }, 0);
 
   document.getElementById('rpt-rev').textContent = fmtBaht(totalRev);
   document.getElementById('rpt-exp').textContent = fmtBaht(totalExp);
@@ -1430,6 +1474,66 @@ function renderReport() {
   var vatTag = document.getElementById('rpt-vat-tag');
   vatCard.className = 'rpt-card vat ' + (vatPayable >= 0 ? 'vat-pay' : 'vat-refund');
   vatTag.textContent = vatPayable >= 0 ? 'PAY' : 'REFUND';
+}
+
+
+async function syncFromSheet() {
+  var url = settings.sheetUrl;
+  if (!url) { showToast('NO SHEET URL // GO TO CONFIG'); return; }
+  var btn = document.getElementById('sync-sheet-btn');
+  var statusEl = document.getElementById('rpt-sync-status');
+  btn.disabled = true; btn.textContent = '⟳ SYNCING...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = '// FETCHING DATA FROM SHEET...';
+
+  try {
+    var res = await fetch(url + '?action=getAll', { method: 'GET', mode: 'cors' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var data = await res.json();
+    if (!data.rows) throw new Error('No rows returned');
+    sheetData = data.rows;
+    persist('fdp_sheet_data', sheetData);
+    var now = new Date();
+    lastSynced = now.toLocaleDateString('en-GB') + ' ' + now.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'});
+    persist('fdp_last_synced', lastSynced);
+    // Reset month picker to show all available months
+    resetMonthPicker();
+    renderReport();
+    showToast('SYNCED // ' + sheetData.length + ' ROWS');
+  } catch(err) {
+    statusEl.textContent = '// ERR: ' + err.message + ' — Check sheet URL & script';
+    showToast('SYNC FAILED');
+  }
+  btn.disabled = false; btn.textContent = '⟳ SYNC';
+}
+
+function resetMonthPicker() {
+  var sel = document.getElementById('report-month');
+  if (!sel) return;
+  sel.innerHTML = '';
+  var months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  // Find all unique months in sheetData
+  var found = {};
+  sheetData.forEach(function(row) {
+    var dateStr = String(row[0]||'');
+    var d;
+    if (dateStr.indexOf('/') > -1) {
+      var dp = dateStr.split('/');
+      if (dp.length===3) d = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
+    } else { d = new Date(dateStr+'T00:00:00'); }
+    if (!d||isNaN(d)) return;
+    var key = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+    found[key] = months[d.getMonth()] + ' ' + d.getFullYear();
+  });
+  // Sort descending
+  var keys = Object.keys(found).sort().reverse();
+  if (!keys.length) { initMonthPicker(); return; }
+  keys.forEach(function(k, i) {
+    var opt = document.createElement('option');
+    opt.value = k; opt.textContent = found[k];
+    if (i===0) opt.selected = true;
+    sel.appendChild(opt);
+  });
 }
 
 function saveSettings() {
